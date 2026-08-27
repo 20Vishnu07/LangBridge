@@ -2,7 +2,6 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const Redis = require('ioredis');
 const { Pool } = require('pg');
 
 const translateRoutes = require('./routes/translate');
@@ -15,7 +14,41 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+// Simple in-memory cache fallback (Redis optional)
+class MemoryCache {
+  constructor() {
+    this.cache = new Map();
+  }
+  async get(key) {
+    const entry = this.cache.get(key);
+    if (entry && entry.expiry > Date.now()) {
+      return entry.value;
+    }
+    this.cache.delete(key);
+    return null;
+  }
+  async setEx(key, ttl, value) {
+    this.cache.set(key, { value, expiry: Date.now() + ttl * 1000 });
+  }
+}
+
+let redis;
+try {
+  const Redis = require('ioredis');
+  redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+    maxRetriesPerRequest: 1,
+    retryStrategy: () => null,
+    connectTimeout: 2000,
+  });
+  redis.on('error', () => {
+    console.log('Redis unavailable, using in-memory cache');
+    redis = new MemoryCache();
+  });
+  redis.on('connect', () => console.log('Redis connected'));
+} catch (e) {
+  console.log('Redis not available, using in-memory cache');
+  redis = new MemoryCache();
+}
 
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/vaanisetu'
